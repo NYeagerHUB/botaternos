@@ -56,7 +56,7 @@ class StatusCog(commands.Cog, name="Status"):
                 "max_players": status.players.max,
                 "player_list": player_names,
                 "latency": status.latency,
-                "motd": str(status.motd).strip() if status.motd else "",
+                "motd": status.motd.to_plain() if status.motd else "",
             }
         except Exception as e:
             logger.warning(f"Không thể kết nối server {ip}:{port} — {e}")
