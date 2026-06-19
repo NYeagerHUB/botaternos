@@ -5,6 +5,20 @@
   "discord_announce_channel_id": 0,
   "reminder_time": "19:00",
   "reminder_min_players": 2,
-  "aternos_username": "coctackeegg",
-  "aternos_server_name": "coctackeegg.aternos.me"
+  "aternos_server_name": "coctackeegg-pRdO.aternos.me",
+  "monitor_interval": 30,
+  "guilds": [
+    {
+      "guild_id": 1443843736349180047,
+      "announce_channel_id": 0,
+      "minecraft_role_id": 1517533912329490663,
+      "ping_everyone": false
+    },
+    {
+      "guild_id": 1411732704596201617,
+      "announce_channel_id": 1411732705216823380,
+      "minecraft_role_id": 0,
+      "ping_everyone": true
+    }
+  ]
 }
