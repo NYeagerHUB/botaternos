@@ -1,0 +1,10 @@
+{
+  "minecraft_server_ip": "play.yourserver.aternos.me",
+  "minecraft_server_port": 25565,
+  "discord_minecraft_role_id": 1517533912329490663,
+  "discord_announce_channel_id": 0,
+  "reminder_time": "19:00",
+  "reminder_min_players": 2,
+  "aternos_username": "",
+  "aternos_server_name": ""
+}
