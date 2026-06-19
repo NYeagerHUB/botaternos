@@ -4,7 +4,6 @@ Kiểm tra trạng thái server Minecraft và danh sách người chơi.
 """
 
 import logging
-import os
 from typing import Optional
 
 import discord
@@ -17,9 +16,18 @@ logger = logging.getLogger("bot.status")
 
 
 def _query_server(ip: str, port: int):
-    """Blocking call — chạy trong executor."""
-    from mcstatus import JavaServer  # noqa: PLC0415
-    server = JavaServer(ip, port, timeout=5)
+    """
+    Blocking call — chạy trong executor.
+    Dùng JavaServer.lookup() để tự resolve SRV record của Aternos
+    (port Aternos thay đổi mỗi lần, SRV record luôn đúng).
+    """
+    from mcstatus import JavaServer
+    # Nếu port là 25565 (default) thì dùng SRV lookup
+    # Nếu có port cụ thể thì dùng luôn
+    if port == 25565:
+        server = JavaServer.lookup(ip, timeout=8)
+    else:
+        server = JavaServer.lookup(f"{ip}:{port}", timeout=8)
     return server.status()
 
 
@@ -29,15 +37,12 @@ class StatusCog(commands.Cog, name="Status"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    # ── Helper: lấy thông tin server ─────────────────────────────────────────
     async def _fetch_status(self):
-        """
-        Trả về dict chứa thông tin server, hoặc None nếu lỗi.
-        """
+        import asyncio
         ip = config.get("minecraft_server_ip", "localhost")
         port = int(config.get("minecraft_server_port", 25565))
 
-        loop = __import__("asyncio").get_event_loop()
+        loop = asyncio.get_event_loop()
         try:
             status = await loop.run_in_executor(None, _query_server, ip, port)
             players_sample = status.players.sample or []
@@ -74,7 +79,6 @@ class StatusCog(commands.Cog, name="Status"):
     @app_commands.guild_only()
     async def status(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-
         info = await self._fetch_status()
         embed = embeds.server_status_embed(
             ip=info["ip"],
@@ -96,7 +100,6 @@ class StatusCog(commands.Cog, name="Status"):
     @app_commands.guild_only()
     async def online(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-
         info = await self._fetch_status()
 
         if not info["online"]:
@@ -111,23 +114,13 @@ class StatusCog(commands.Cog, name="Status"):
         ip = info["ip"]
         port = info["port"]
         players = info["player_list"]
-        count = info["player_count"]
-        max_p = info["max_players"]
 
         embed = embeds.base_embed(
             title="🎮 Danh sách người chơi Minecraft",
             color_key="online" if players else "info",
         )
-        embed.add_field(
-            name="🌐 Server",
-            value=f"`{ip}:{port}`",
-            inline=True,
-        )
-        embed.add_field(
-            name="👥 Số người",
-            value=f"`{count}/{max_p}`",
-            inline=True,
-        )
+        embed.add_field(name="🌐 Server", value=f"`{ip}`", inline=True)
+        embed.add_field(name="👥 Số người", value=f"`{info['player_count']}/{info['max_players']}`", inline=True)
         embed.add_field(
             name="📶 Ping",
             value=f"`{info['latency']:.1f} ms`" if info["latency"] else "`N/A`",
@@ -135,10 +128,9 @@ class StatusCog(commands.Cog, name="Status"):
         )
 
         if players:
-            player_list_str = "\n".join(f"• `{p}`" for p in players)
             embed.add_field(
                 name=f"🟢 Đang online ({len(players)})",
-                value=player_list_str,
+                value="\n".join(f"• `{p}`" for p in players),
                 inline=False,
             )
         else:
@@ -159,7 +151,6 @@ class StatusCog(commands.Cog, name="Status"):
     async def ruchoi(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
 
-        # Lấy role ID từ config
         role_id = config.get("discord_minecraft_role_id", 0)
         if not role_id:
             await interaction.followup.send(
@@ -172,12 +163,11 @@ class StatusCog(commands.Cog, name="Status"):
         role = guild.get_role(int(role_id))
         if not role:
             await interaction.followup.send(
-                f"⚠️ Không tìm thấy role ID `{role_id}` trong server Discord.",
+                f"⚠️ Không tìm thấy role ID `{role_id}`.",
                 ephemeral=True,
             )
             return
 
-        # Lấy danh sách members có role
         role_members = [m for m in role.members if not m.bot]
         if not role_members:
             await interaction.followup.send(
@@ -186,18 +176,14 @@ class StatusCog(commands.Cog, name="Status"):
             )
             return
 
-        # Lấy danh sách người chơi Minecraft
         info = await self._fetch_status()
         mc_players_lower = [p.lower() for p in info["player_list"]]
 
-        # So sánh: thành viên Discord mà tên Minecraft KHÔNG có trong danh sách online
-        # Logic: nếu display_name hoặc tên Discord trùng với tên MC thì coi là đang chơi
         def is_playing(member: discord.Member) -> bool:
-            names_to_check = [
-                member.display_name.lower(),
-                member.name.lower(),
-            ]
-            return any(n in mc_players_lower for n in names_to_check)
+            return any(
+                n in mc_players_lower
+                for n in [member.display_name.lower(), member.name.lower()]
+            )
 
         not_playing = [m for m in role_members if not is_playing(m)]
 
@@ -206,8 +192,7 @@ class StatusCog(commands.Cog, name="Status"):
             members_not_in=not_playing,
         )
 
-        # Gửi embed + mention ngoài embed (embed không ping)
-        mention_str = ""
+        mention_str = None
         if not_playing:
             mention_str = (
                 " ".join(m.mention for m in not_playing)
@@ -215,7 +200,7 @@ class StatusCog(commands.Cog, name="Status"):
             )
 
         await interaction.followup.send(
-            content=mention_str if mention_str else None,
+            content=mention_str,
             embed=embed,
         )
 
