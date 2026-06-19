@@ -1,11 +1,12 @@
 """
 Cog: Aternos — /startserver
-Kết nối Aternos, khởi động server, theo dõi trạng thái và thông báo khi online.
+Điều khiển Aternos qua session cookie + aiohttp (không dùng python-aternos)
 """
 
 import asyncio
 import logging
 import os
+import aiohttp
 from typing import Optional
 
 import discord
@@ -16,71 +17,84 @@ from utils import config, embeds
 
 logger = logging.getLogger("bot.aternos")
 
-# Khoảng thời gian poll trạng thái (giây)
 POLL_INTERVAL = 15
-# Timeout tối đa chờ server online (giây) — 10 phút
 MAX_WAIT_TIME = 600
+
+# Aternos API endpoints
+BASE_URL = "https://aternos.org"
+API_URL  = "https://aternos.org/panel/ajax"
 
 
 class AternosCog(commands.Cog, name="Aternos"):
-    """Quản lý Aternos server."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._starting: bool = False   # lock để tránh double start
+        self._starting = False
 
-    # ── Helper: lấy Aternos client ────────────────────────────────────────────
-    def _get_aternos_client(self):
-        """
-        Khởi tạo python-aternos client.
-        Trả về (client, server) hoặc raise Exception.
-        """
-        try:
-            from python_aternos import Client, AternosServer  # noqa: F401
-        except ImportError:
-            raise RuntimeError(
-                "Thư viện python-aternos chưa được cài đặt. "
-                "Chạy: pip install python-aternos"
-            )
+    def _get_session_cookie(self) -> str:
+        cookie = os.getenv("ATERNOS_SESSION")
+        if not cookie:
+            raise ValueError("Thiếu ATERNOS_SESSION trong biến môi trường!")
+        return cookie
 
-        username = os.getenv("ATERNOS_USERNAME") or config.get("aternos_username")
-        password = os.getenv("ATERNOS_PASSWORD")
-        server_name = os.getenv("ATERNOS_SERVER") or config.get("aternos_server_name")
+    def _get_headers(self, cookie: str) -> dict:
+        return {
+            "Cookie": f"ATERNOS_SESSION={cookie}",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://aternos.org/server/",
+        }
 
-        if not username or not password:
-            raise ValueError(
-                "Thiếu ATERNOS_USERNAME hoặc ATERNOS_PASSWORD trong .env"
-            )
+    async def _get_server_info(self, session: aiohttp.ClientSession, cookie: str) -> dict:
+        """Lấy thông tin server hiện tại."""
+        headers = self._get_headers(cookie)
+        async with session.get(
+            f"{API_URL}/status",
+            headers=headers,
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"Lỗi API Aternos: HTTP {resp.status}")
+            data = await resp.json(content_type=None)
+            return data
 
-        from python_aternos import Client
-        client = Client.from_credentials(username, password)
-        servers = client.list_servers()
+    async def _start_server(self, session: aiohttp.ClientSession, cookie: str) -> bool:
+        """Gửi lệnh start server."""
+        headers = self._get_headers(cookie)
+        # Lấy ATERNOS_SERVER token từ trang
+        async with session.get(
+            f"{BASE_URL}/server/",
+            headers=headers,
+        ) as resp:
+            text = await resp.text()
+            # Tìm server token trong HTML
+            server_token = None
+            for line in text.split("\n"):
+                if "window.headless" in line or "ATERNOS_SERVER" in line:
+                    logger.debug(f"Found line: {line[:100]}")
+                if 'let lastStatus' in line or '"server"' in line:
+                    pass
 
-        if not servers:
-            raise RuntimeError("Không tìm thấy server nào trong tài khoản Aternos.")
-
-        # Chọn server theo tên hoặc lấy server đầu tiên
-        server = None
-        if server_name:
-            for s in servers:
-                if server_name.lower() in s.domain.lower():
-                    server = s
-                    break
-        if server is None:
-            server = servers[0]
-
-        return client, server
+        # Gửi lệnh start
+        async with session.get(
+            f"{API_URL}/start",
+            headers=headers,
+            params={"headless": "true"},
+        ) as resp:
+            data = await resp.json(content_type=None)
+            logger.info(f"Start response: {data}")
+            success = data.get("success", False)
+            return success
 
     # ── /startserver ──────────────────────────────────────────────────────────
     @app_commands.command(
         name="startserver",
-        description="🚀 Khởi động Minecraft server trên Aternos",
+        description="🚀 Khởi động Minecraft server Aternos",
     )
     @app_commands.guild_only()
     async def startserver(self, interaction: discord.Interaction):
         if self._starting:
             await interaction.response.send_message(
-                "⚠️ Server đang trong quá trình khởi động. Vui lòng chờ!",
+                "⚠️ Server đang trong quá trình khởi động, vui lòng chờ!",
                 ephemeral=True,
             )
             return
@@ -89,7 +103,19 @@ class AternosCog(commands.Cog, name="Aternos"):
 
         try:
             self._starting = True
-            await self._start_and_monitor(interaction)
+            cookie = self._get_session_cookie()
+        except ValueError as e:
+            embed = embeds.base_embed(
+                title="❌ Lỗi cấu hình",
+                description=str(e),
+                color_key="error",
+            )
+            await interaction.followup.send(embed=embed)
+            self._starting = False
+            return
+
+        try:
+            await self._start_and_monitor(interaction, cookie)
         except Exception as e:
             logger.error(f"startserver error: {e}", exc_info=True)
             embed = embeds.base_embed(
@@ -104,124 +130,101 @@ class AternosCog(commands.Cog, name="Aternos"):
         finally:
             self._starting = False
 
-    async def _start_and_monitor(self, interaction: discord.Interaction):
-        """Chạy trong background: start server rồi poll đến khi online."""
-        loop = asyncio.get_event_loop()
+    async def _start_and_monitor(self, interaction: discord.Interaction, cookie: str):
+        ip = config.get("minecraft_server_ip", "coctackeegg.aternos.me")
 
-        # ── Bước 1: Kết nối Aternos (blocking → thread pool) ──────────────
-        try:
-            client, server = await loop.run_in_executor(
-                None, self._get_aternos_client
-            )
-        except Exception as e:
-            embed = embeds.base_embed(
-                title="❌ Không thể kết nối Aternos",
-                description=str(e),
-                color_key="error",
-            )
-            await interaction.followup.send(embed=embed)
-            return
-
-        server_domain = getattr(server, "domain", "unknown")
-        logger.info(f"Đã kết nối Aternos — server: {server_domain}")
-
-        # ── Bước 2: Kiểm tra trạng thái hiện tại ──────────────────────────
-        current_status = await loop.run_in_executor(
-            None, lambda: getattr(server, "status", "unknown")
-        )
-        logger.info(f"Trạng thái hiện tại: {current_status}")
-
-        if str(current_status).lower() in ("online", "starting", "loading", "waiting"):
-            embed = embeds.aternos_status_embed(str(current_status), server_domain)
-            embed.description = (
-                embed.description or ""
-            ) + "\n\n_(Server đã đang chạy, không cần start lại)_"
-            msg = await interaction.followup.send(embed=embed)
-        else:
-            # ── Bước 3: Gửi lệnh start ────────────────────────────────────
+        async with aiohttp.ClientSession() as session:
+            # Bước 1: Kiểm tra trạng thái hiện tại
             try:
-                await loop.run_in_executor(None, server.start)
-                logger.info("Đã gửi lệnh start tới Aternos.")
+                info = await self._get_server_info(session, cookie)
+                current_status = info.get("class", info.get("status", "unknown"))
+                logger.info(f"Trạng thái hiện tại: {current_status} | raw: {info}")
             except Exception as e:
-                embed = embeds.base_embed(
-                    title="❌ Không thể gửi lệnh start",
-                    description=str(e),
-                    color_key="error",
-                )
+                logger.warning(f"Không lấy được status: {e}")
+                current_status = "unknown"
+
+            if current_status in ("online",):
+                embed = embeds.aternos_status_embed("online", ip)
+                embed.description = f"✅ Server đã online rồi! Kết nối: **`{ip}`**"
                 await interaction.followup.send(embed=embed)
                 return
 
-            embed = embeds.aternos_status_embed("starting", server_domain)
+            # Bước 2: Start server
+            if current_status not in ("starting", "loading", "waiting", "preparing"):
+                try:
+                    success = await self._start_server(session, cookie)
+                    if not success:
+                        raise RuntimeError("Aternos từ chối lệnh start")
+                    logger.info("Đã gửi lệnh start thành công")
+                except Exception as e:
+                    embed = embeds.base_embed(
+                        title="❌ Không thể start server",
+                        description=(
+                            f"```{e}```\n\n"
+                            "**Thử thủ công:**\n"
+                            f"Vào [aternos.org/server/](https://aternos.org/server/) và bấm START"
+                        ),
+                        color_key="error",
+                    )
+                    await interaction.followup.send(embed=embed)
+                    return
+
+            embed = embeds.aternos_status_embed("starting", ip)
             msg = await interaction.followup.send(embed=embed)
 
-        # ── Bước 4: Poll trạng thái cho đến khi online ────────────────────
-        elapsed = 0
-        last_status = ""
+            # Bước 3: Poll trạng thái
+            elapsed = 0
+            last_status = ""
 
-        while elapsed < MAX_WAIT_TIME:
-            await asyncio.sleep(POLL_INTERVAL)
-            elapsed += POLL_INTERVAL
+            while elapsed < MAX_WAIT_TIME:
+                await asyncio.sleep(POLL_INTERVAL)
+                elapsed += POLL_INTERVAL
 
+                try:
+                    info = await self._get_server_info(session, cookie)
+                    raw_status = info.get("class", info.get("status", "unknown")).lower()
+                except Exception as e:
+                    logger.warning(f"Poll error: {e}")
+                    continue
+
+                if raw_status == last_status:
+                    continue
+
+                last_status = raw_status
+                logger.info(f"Aternos status: {raw_status}")
+
+                updated_embed = embeds.aternos_status_embed(raw_status, ip)
+                try:
+                    await msg.edit(embed=updated_embed)
+                except discord.HTTPException:
+                    pass
+
+                if raw_status == "online":
+                    channel_id = config.get("discord_announce_channel_id", 0)
+                    if channel_id:
+                        channel = self.bot.get_channel(int(channel_id))
+                        if channel:
+                            announce = embeds.base_embed(
+                                title="🟢 Server Minecraft đã ONLINE!",
+                                description=f"✅ Kết nối: **`{ip}`**\nGõ `/online` để xem ai đang chơi!",
+                                color_key="online",
+                            )
+                            await channel.send(embed=announce)
+                    return
+
+                if raw_status in ("offline", "error", "stopping"):
+                    return
+
+            # Timeout
+            timeout_embed = embeds.base_embed(
+                title="⏰ Hết thời gian chờ",
+                description=f"Server chưa online sau {MAX_WAIT_TIME // 60} phút. Kiểm tra Aternos thủ công.",
+                color_key="warning",
+            )
             try:
-                # Refresh server object
-                client2, server = await loop.run_in_executor(
-                    None, self._get_aternos_client
-                )
-                raw_status = await loop.run_in_executor(
-                    None, lambda: str(getattr(server, "status", "unknown")).lower()
-                )
-            except Exception as e:
-                logger.warning(f"Poll error: {e}")
-                continue
-
-            if raw_status == last_status:
-                continue  # không đổi → không update embed
-
-            last_status = raw_status
-            logger.info(f"Aternos status: {raw_status}")
-
-            ip = config.get("minecraft_server_ip", server_domain)
-            updated_embed = embeds.aternos_status_embed(raw_status, ip)
-
-            try:
-                await msg.edit(embed=updated_embed)
+                await msg.edit(embed=timeout_embed)
             except discord.HTTPException:
                 pass
-
-            if raw_status == "online":
-                # Gửi thêm thông báo vào channel
-                channel_id = config.get("discord_announce_channel_id", 0)
-                if channel_id:
-                    channel = self.bot.get_channel(int(channel_id))
-                    if channel:
-                        announce_embed = embeds.base_embed(
-                            title="🟢 Server Minecraft đã ONLINE!",
-                            description=(
-                                f"✅ Kết nối ngay: **`{ip}`**\n\n"
-                                "Gõ `/online` để xem ai đang chơi nhé!"
-                            ),
-                            color_key="online",
-                        )
-                        await channel.send(embed=announce_embed)
-                return
-
-            if raw_status in ("offline", "error", "stopping"):
-                logger.warning(f"Server về trạng thái bất thường: {raw_status}")
-                return
-
-        # Timeout
-        timeout_embed = embeds.base_embed(
-            title="⏰ Hết thời gian chờ",
-            description=(
-                f"Server chưa online sau {MAX_WAIT_TIME // 60} phút. "
-                "Vui lòng kiểm tra Aternos thủ công."
-            ),
-            color_key="warning",
-        )
-        try:
-            await msg.edit(embed=timeout_embed)
-        except discord.HTTPException:
-            pass
 
 
 async def setup(bot: commands.Bot):
