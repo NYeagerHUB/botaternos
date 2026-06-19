@@ -1,13 +1,13 @@
 """
 Cog: Aternos — /startserver
-Điều khiển Aternos qua session cookie + aiohttp (không dùng python-aternos)
+Điều khiển Aternos qua session cookie + aiohttp
 """
 
 import asyncio
 import logging
 import os
 import aiohttp
-from typing import Optional
+from yarl import URL
 
 import discord
 from discord import app_commands
@@ -20,9 +20,25 @@ logger = logging.getLogger("bot.aternos")
 POLL_INTERVAL = 15
 MAX_WAIT_TIME = 600
 
-# Aternos API endpoints
-BASE_URL = "https://aternos.org"
-API_URL  = "https://aternos.org/panel/ajax"
+ATERNOS_ORIGIN = "https://aternos.org"
+
+
+def _make_session(cookie: str) -> aiohttp.ClientSession:
+    """Tạo aiohttp session với cookie Aternos."""
+    # Dùng CookieJar unsafe để tránh lỗi header injection
+    jar = aiohttp.CookieJar(unsafe=True)
+    jar.update_cookies(
+        {"ATERNOS_SESSION": cookie.strip()},
+        URL(ATERNOS_ORIGIN),
+    )
+    return aiohttp.ClientSession(
+        cookie_jar=jar,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{ATERNOS_ORIGIN}/server/",
+        },
+    )
 
 
 class AternosCog(commands.Cog, name="Aternos"):
@@ -32,58 +48,25 @@ class AternosCog(commands.Cog, name="Aternos"):
         self._starting = False
 
     def _get_session_cookie(self) -> str:
-        cookie = os.getenv("ATERNOS_SESSION")
+        cookie = os.getenv("ATERNOS_SESSION", "").strip()
         if not cookie:
             raise ValueError("Thiếu ATERNOS_SESSION trong biến môi trường!")
         return cookie
 
-    def _get_headers(self, cookie: str) -> dict:
-        return {
-            "Cookie": f"ATERNOS_SESSION={cookie}",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": "https://aternos.org/server/",
-        }
-
-    async def _get_server_info(self, session: aiohttp.ClientSession, cookie: str) -> dict:
-        """Lấy thông tin server hiện tại."""
-        headers = self._get_headers(cookie)
-        async with session.get(
-            f"{API_URL}/status",
-            headers=headers,
-        ) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"Lỗi API Aternos: HTTP {resp.status}")
+    async def _get_status(self, session: aiohttp.ClientSession) -> dict:
+        async with session.get(f"{ATERNOS_ORIGIN}/panel/ajax/status") as resp:
+            if resp.status == 403:
+                raise RuntimeError("Session cookie hết hạn hoặc không hợp lệ (403)")
             data = await resp.json(content_type=None)
             return data
 
-    async def _start_server(self, session: aiohttp.ClientSession, cookie: str) -> bool:
-        """Gửi lệnh start server."""
-        headers = self._get_headers(cookie)
-        # Lấy ATERNOS_SERVER token từ trang
-        async with session.get(
-            f"{BASE_URL}/server/",
-            headers=headers,
-        ) as resp:
-            text = await resp.text()
-            # Tìm server token trong HTML
-            server_token = None
-            for line in text.split("\n"):
-                if "window.headless" in line or "ATERNOS_SERVER" in line:
-                    logger.debug(f"Found line: {line[:100]}")
-                if 'let lastStatus' in line or '"server"' in line:
-                    pass
-
-        # Gửi lệnh start
-        async with session.get(
-            f"{API_URL}/start",
-            headers=headers,
-            params={"headless": "true"},
-        ) as resp:
+    async def _do_start(self, session: aiohttp.ClientSession) -> None:
+        async with session.get(f"{ATERNOS_ORIGIN}/panel/ajax/start") as resp:
             data = await resp.json(content_type=None)
             logger.info(f"Start response: {data}")
-            success = data.get("success", False)
-            return success
+            if not data.get("success", False):
+                error = data.get("error", "unknown")
+                raise RuntimeError(f"Aternos từ chối: {error}")
 
     # ── /startserver ──────────────────────────────────────────────────────────
     @app_commands.command(
@@ -94,23 +77,22 @@ class AternosCog(commands.Cog, name="Aternos"):
     async def startserver(self, interaction: discord.Interaction):
         if self._starting:
             await interaction.response.send_message(
-                "⚠️ Server đang trong quá trình khởi động, vui lòng chờ!",
+                "⚠️ Server đang khởi động, vui lòng chờ!",
                 ephemeral=True,
             )
             return
 
         await interaction.response.defer(thinking=True)
+        self._starting = True
 
         try:
-            self._starting = True
             cookie = self._get_session_cookie()
         except ValueError as e:
-            embed = embeds.base_embed(
+            await interaction.followup.send(embed=embeds.base_embed(
                 title="❌ Lỗi cấu hình",
                 description=str(e),
                 color_key="error",
-            )
-            await interaction.followup.send(embed=embed)
+            ))
             self._starting = False
             return
 
@@ -118,13 +100,12 @@ class AternosCog(commands.Cog, name="Aternos"):
             await self._start_and_monitor(interaction, cookie)
         except Exception as e:
             logger.error(f"startserver error: {e}", exc_info=True)
-            embed = embeds.base_embed(
-                title="❌ Lỗi khởi động server",
-                description=f"```{e}```",
-                color_key="error",
-            )
             try:
-                await interaction.followup.send(embed=embed)
+                await interaction.followup.send(embed=embeds.base_embed(
+                    title="❌ Lỗi khởi động server",
+                    description=f"```{e}```",
+                    color_key="error",
+                ))
             except Exception:
                 pass
         finally:
@@ -133,46 +114,43 @@ class AternosCog(commands.Cog, name="Aternos"):
     async def _start_and_monitor(self, interaction: discord.Interaction, cookie: str):
         ip = config.get("minecraft_server_ip", "coctackeegg.aternos.me")
 
-        async with aiohttp.ClientSession() as session:
-            # Bước 1: Kiểm tra trạng thái hiện tại
+        async with _make_session(cookie) as session:
+            # Bước 1: Kiểm tra trạng thái
             try:
-                info = await self._get_server_info(session, cookie)
-                current_status = info.get("class", info.get("status", "unknown"))
-                logger.info(f"Trạng thái hiện tại: {current_status} | raw: {info}")
+                info = await self._get_status(session)
+                current_status = str(info.get("class", info.get("status", "offline"))).lower()
+                logger.info(f"Trạng thái: {current_status} | raw: {info}")
             except Exception as e:
                 logger.warning(f"Không lấy được status: {e}")
-                current_status = "unknown"
+                current_status = "offline"
 
-            if current_status in ("online",):
+            if current_status == "online":
                 embed = embeds.aternos_status_embed("online", ip)
-                embed.description = f"✅ Server đã online rồi! Kết nối: **`{ip}`**"
+                embed.description = f"✅ Server đã online! Kết nối: **`{ip}`**"
                 await interaction.followup.send(embed=embed)
                 return
 
-            # Bước 2: Start server
+            # Bước 2: Gửi lệnh start nếu chưa khởi động
             if current_status not in ("starting", "loading", "waiting", "preparing"):
                 try:
-                    success = await self._start_server(session, cookie)
-                    if not success:
-                        raise RuntimeError("Aternos từ chối lệnh start")
-                    logger.info("Đã gửi lệnh start thành công")
+                    await self._do_start(session)
+                    logger.info("Đã gửi lệnh start")
                 except Exception as e:
-                    embed = embeds.base_embed(
+                    await interaction.followup.send(embed=embeds.base_embed(
                         title="❌ Không thể start server",
                         description=(
                             f"```{e}```\n\n"
-                            "**Thử thủ công:**\n"
-                            f"Vào [aternos.org/server/](https://aternos.org/server/) và bấm START"
+                            "Thử thủ công: [aternos.org/server/](https://aternos.org/server/)"
                         ),
                         color_key="error",
-                    )
-                    await interaction.followup.send(embed=embed)
+                    ))
                     return
 
-            embed = embeds.aternos_status_embed("starting", ip)
-            msg = await interaction.followup.send(embed=embed)
+            msg = await interaction.followup.send(
+                embed=embeds.aternos_status_embed("starting", ip)
+            )
 
-            # Bước 3: Poll trạng thái
+            # Bước 3: Poll cho đến khi online
             elapsed = 0
             last_status = ""
 
@@ -181,48 +159,44 @@ class AternosCog(commands.Cog, name="Aternos"):
                 elapsed += POLL_INTERVAL
 
                 try:
-                    info = await self._get_server_info(session, cookie)
-                    raw_status = info.get("class", info.get("status", "unknown")).lower()
+                    info = await self._get_status(session)
+                    raw_status = str(info.get("class", info.get("status", "unknown"))).lower()
                 except Exception as e:
                     logger.warning(f"Poll error: {e}")
                     continue
 
                 if raw_status == last_status:
                     continue
-
                 last_status = raw_status
-                logger.info(f"Aternos status: {raw_status}")
+                logger.info(f"Poll status: {raw_status}")
 
-                updated_embed = embeds.aternos_status_embed(raw_status, ip)
                 try:
-                    await msg.edit(embed=updated_embed)
+                    await msg.edit(embed=embeds.aternos_status_embed(raw_status, ip))
                 except discord.HTTPException:
                     pass
 
                 if raw_status == "online":
                     channel_id = config.get("discord_announce_channel_id", 0)
                     if channel_id:
-                        channel = self.bot.get_channel(int(channel_id))
-                        if channel:
-                            announce = embeds.base_embed(
-                                title="🟢 Server Minecraft đã ONLINE!",
-                                description=f"✅ Kết nối: **`{ip}`**\nGõ `/online` để xem ai đang chơi!",
+                        ch = self.bot.get_channel(int(channel_id))
+                        if ch:
+                            await ch.send(embed=embeds.base_embed(
+                                title="🟢 Server Minecraft ONLINE!",
+                                description=f"Kết nối: **`{ip}`** — Gõ `/online` để xem ai đang chơi!",
                                 color_key="online",
-                            )
-                            await channel.send(embed=announce)
+                            ))
                     return
 
                 if raw_status in ("offline", "error", "stopping"):
                     return
 
             # Timeout
-            timeout_embed = embeds.base_embed(
-                title="⏰ Hết thời gian chờ",
-                description=f"Server chưa online sau {MAX_WAIT_TIME // 60} phút. Kiểm tra Aternos thủ công.",
-                color_key="warning",
-            )
             try:
-                await msg.edit(embed=timeout_embed)
+                await msg.edit(embed=embeds.base_embed(
+                    title="⏰ Hết thời gian chờ",
+                    description=f"Server chưa online sau {MAX_WAIT_TIME // 60} phút.",
+                    color_key="warning",
+                ))
             except discord.HTTPException:
                 pass
 
