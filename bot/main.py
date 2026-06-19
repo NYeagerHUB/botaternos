@@ -66,12 +66,16 @@ class MinecraftBot(commands.Bot):
             except Exception as e:
                 logger.error(f"❌ Không thể load cog {cog}: {e}", exc_info=True)
 
-        # Sync slash commands
-        if GUILD_ID:
-            guild = discord.Object(id=int(GUILD_ID))
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-            logger.info(f"🔄 Synced {len(synced)} slash commands (guild)")
+        # Sync slash commands cho tất cả guild trong GUILD_IDS
+        guild_ids_env = os.getenv("GUILD_IDS", os.getenv("GUILD_ID", ""))
+        guild_ids = [gid.strip() for gid in guild_ids_env.split(",") if gid.strip()]
+
+        if guild_ids:
+            for gid in guild_ids:
+                guild_obj = discord.Object(id=int(gid))
+                self.tree.copy_global_to(guild=guild_obj)
+                synced = await self.tree.sync(guild=guild_obj)
+                logger.info(f"🔄 Synced {len(synced)} slash commands (guild {gid})")
         else:
             synced = await self.tree.sync()
             logger.info(f"🔄 Synced {len(synced)} slash commands (global)")
