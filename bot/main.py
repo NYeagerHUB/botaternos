@@ -100,10 +100,10 @@ class MinecraftBot(commands.Bot):
 
 # ── Main runner với reconnect logic ───────────────────────────────────────────
 async def main():
-    bot = MinecraftBot()
     reconnect_delay = 5  # giây
 
     while True:
+        bot = MinecraftBot()  # tạo bot mới mỗi lần reconnect
         try:
             logger.info("🚀 Đang khởi động bot...")
             async with bot:
@@ -114,14 +114,14 @@ async def main():
         except discord.HTTPException as e:
             logger.error(f"HTTP error: {e}. Thử lại sau {reconnect_delay}s...")
             await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, 60)
         except KeyboardInterrupt:
             logger.info("🛑 Bot dừng theo yêu cầu người dùng.")
             break
         except Exception as e:
             logger.error(f"Lỗi không xác định: {e}. Thử lại sau {reconnect_delay}s...", exc_info=True)
             await asyncio.sleep(reconnect_delay)
-        finally:
-            reconnect_delay = min(reconnect_delay * 2, 60)  # exponential backoff, max 60s
+            reconnect_delay = min(reconnect_delay * 2, 60)
 
 
 if __name__ == "__main__":
