@@ -58,6 +58,7 @@ class MinecraftBot(commands.Bot):
             "cogs.status",
             "cogs.reminder",
             "cogs.monitor",
+            "cogs.music",
         ]
         for cog in cogs:
             try:
