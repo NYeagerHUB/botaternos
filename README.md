@@ -9,9 +9,11 @@ Bot Discord quản lý Minecraft server trên **Aternos** với slash commands, 
 | Lệnh | Mô tả |
 |------|-------|
 | `/startserver` | Kết nối Aternos, khởi động server, theo dõi trạng thái đến khi online |
+| `/stopserver` / `/offserver` | Kết nối Aternos bằng browser thật, tắt server và theo dõi đến khi offline |
 | `/status` | Kiểm tra trạng thái server (online/offline, số người, ping, MOTD) |
 | `/online` | Danh sách người đang chơi (embed đẹp) |
 | `/ruchoi` | So sánh role Discord vs người chơi MC, tag người chưa vào |
+| `/play` | Nghe nhạc từ YouTube bằng tên bài, link video hoặc playlist |
 | Auto Reminder | Mỗi ngày lúc 19:00, tự động tag role nếu ít hơn 2 người online |
 
 ---
@@ -230,6 +232,7 @@ Có thể chỉnh file `bot/config.json` trực tiếp mà **không cần restar
 |---------|---------|---------|
 | `discord.py` | 2.3.2 | Discord API, slash commands |
 | `mcstatus` | 11.1.1 | Query Minecraft server status |
+| `yt-dlp` | 2024.4.9 | Lấy stream nhạc từ YouTube |
 | `playwright` | 1.60.0 | Điều khiển browser thật để thao tác Aternos |
 | `aiohttp` | 3.9.5 | Async HTTP (dependency) |
 | `python-dotenv` | 1.0.1 | Load file .env |

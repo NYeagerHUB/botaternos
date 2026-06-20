@@ -145,26 +145,46 @@ class AternosBrowser:
     async def start(self) -> None:
         await self._dismiss_popups()
 
-        start_selectors = (
-            "#start",
-            ".server-start",
-            "[data-action='start']",
-            "button:has-text('Start')",
-            "a:has-text('Start')",
-            "div:has-text('Start')",
+        await self._click_server_action(
+            selectors=(
+                "#start",
+                ".server-start",
+                "[data-action='start']",
+                "button:has-text('Start')",
+                "a:has-text('Start')",
+                "div:has-text('Start')",
+            ),
+            action_name="Start",
         )
+        await self._confirm_action_if_needed()
 
-        for selector in start_selectors:
+    async def stop(self) -> None:
+        await self._dismiss_popups()
+
+        await self._click_server_action(
+            selectors=(
+                "#stop",
+                ".server-stop",
+                "[data-action='stop']",
+                "button:has-text('Stop')",
+                "a:has-text('Stop')",
+                "div:has-text('Stop')",
+            ),
+            action_name="Stop",
+        )
+        await self._confirm_action_if_needed()
+
+    async def _click_server_action(self, selectors: tuple[str, ...], action_name: str) -> None:
+        for selector in selectors:
             locator = self.page.locator(selector).first
             try:
                 if await locator.count() and await locator.is_visible(timeout=2000):
                     await locator.click(timeout=5000)
-                    await self._confirm_start_if_needed()
                     return
             except PlaywrightTimeoutError:
                 continue
 
-        raise RuntimeError("Could not find the Aternos Start button in the browser UI.")
+        raise RuntimeError(f"Could not find the Aternos {action_name} button in the browser UI.")
 
     async def _login(self) -> None:
         if not (self.username and self.password):
@@ -217,19 +237,21 @@ class AternosBrowser:
     async def _wait_for_server_panel(self) -> None:
         try:
             await self.page.wait_for_selector(
-                "#start, .server-start, .statuslabel, [class*='status']",
+                "#start, #stop, .server-start, .server-stop, .statuslabel, [class*='status']",
                 timeout=30000,
             )
         except PlaywrightTimeoutError as exc:
             raise RuntimeError("Aternos server panel did not load in the browser.") from exc
 
-    async def _confirm_start_if_needed(self) -> None:
+    async def _confirm_action_if_needed(self) -> None:
         await asyncio.sleep(1)
         for selector in (
             "button:has-text('Confirm')",
             "button:has-text('Yes')",
             "button:has-text('Continue')",
+            "button:has-text('Ok')",
             ".btn-success:visible",
+            ".btn-danger:visible",
         ):
             locator = self.page.locator(selector).first
             try:
@@ -262,11 +284,10 @@ class AternosBrowser:
                 return status
         return "unknown"
 
-
 class AternosCog(commands.Cog, name="Aternos"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._starting = False
+        self._server_task_running = False
 
     @app_commands.command(
         name="startserver",
@@ -274,15 +295,15 @@ class AternosCog(commands.Cog, name="Aternos"):
     )
     @app_commands.guild_only()
     async def startserver(self, interaction: discord.Interaction):
-        if self._starting:
+        if self._server_task_running:
             await interaction.response.send_message(
-                "Server is already starting. Please wait.",
+                "A server action is already running. Please wait.",
                 ephemeral=True,
             )
             return
 
         await interaction.response.defer(thinking=True)
-        self._starting = True
+        self._server_task_running = True
 
         try:
             await self._start_and_monitor(interaction)
@@ -297,7 +318,49 @@ class AternosCog(commands.Cog, name="Aternos"):
             except Exception:
                 pass
         finally:
-            self._starting = False
+            self._server_task_running = False
+
+    @app_commands.command(
+        name="stopserver",
+        description="Stop the Minecraft Aternos server",
+    )
+    @app_commands.guild_only()
+    async def stopserver(self, interaction: discord.Interaction):
+        await self._handle_stop_command(interaction)
+
+    @app_commands.command(
+        name="offserver",
+        description="Turn off the Minecraft Aternos server",
+    )
+    @app_commands.guild_only()
+    async def offserver(self, interaction: discord.Interaction):
+        await self._handle_stop_command(interaction)
+
+    async def _handle_stop_command(self, interaction: discord.Interaction):
+        if self._server_task_running:
+            await interaction.response.send_message(
+                "A server action is already running. Please wait.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True)
+        self._server_task_running = True
+
+        try:
+            await self._stop_and_monitor(interaction)
+        except Exception as e:
+            logger.error("stopserver error: %s", e, exc_info=True)
+            try:
+                await interaction.followup.send(embed=embeds.base_embed(
+                    title="Could not stop server",
+                    description=f"```{e}```",
+                    color_key="error",
+                ))
+            except Exception:
+                pass
+        finally:
+            self._server_task_running = False
 
     async def _start_and_monitor(self, interaction: discord.Interaction):
         ip = config.get("minecraft_server_ip", "coctackeegg.aternos.me")
@@ -357,6 +420,66 @@ class AternosCog(commands.Cog, name="Aternos"):
                 await msg.edit(embed=embeds.base_embed(
                     title="Start timed out",
                     description=f"Server did not come online after {MAX_WAIT_TIME // 60} minutes.",
+                    color_key="warning",
+                ))
+            except discord.HTTPException:
+                pass
+
+    async def _stop_and_monitor(self, interaction: discord.Interaction):
+        ip = config.get("minecraft_server_ip", "coctackeegg.aternos.me")
+
+        async with AternosBrowser() as aternos:
+            await aternos.open_server()
+
+            current_status = await aternos.status()
+            logger.info("Aternos browser status before stop: %s", current_status)
+
+            if current_status == "offline":
+                await interaction.followup.send(embed=embeds.aternos_status_embed("offline", ip))
+                return
+
+            if current_status not in ("stopping", "offline"):
+                await aternos.stop()
+                logger.info("Clicked Aternos Stop in browser")
+
+            msg = await interaction.followup.send(
+                embed=embeds.aternos_status_embed("stopping", ip)
+            )
+
+            elapsed = 0
+            last_status = ""
+
+            while elapsed < MAX_WAIT_TIME:
+                await asyncio.sleep(POLL_INTERVAL)
+                elapsed += POLL_INTERVAL
+
+                try:
+                    raw_status = await aternos.status()
+                except Exception as e:
+                    logger.warning("Browser stop poll error: %s", e)
+                    continue
+
+                if raw_status == last_status:
+                    continue
+
+                last_status = raw_status
+                logger.info("Aternos browser stop poll status: %s", raw_status)
+
+                try:
+                    await msg.edit(embed=embeds.aternos_status_embed(raw_status, ip))
+                except discord.HTTPException:
+                    pass
+
+                if raw_status == "offline":
+                    return
+
+                if raw_status == "error":
+                    return
+
+            try:
+                await msg.edit(embed=embeds.base_embed(
+                    title="Stop timed out",
+                    description=f"Server did not go offline after {MAX_WAIT_TIME // 60} minutes.",
                     color_key="warning",
                 ))
             except discord.HTTPException:
