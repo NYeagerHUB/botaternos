@@ -1,5 +1,8 @@
 [phases.setup]
 nixPkgs = ["ffmpeg", "python312"]
 
+[phases.build]
+cmds = ["python -m playwright install --with-deps chromium"]
+
 [start]
 cmd = "python bot/main.py"

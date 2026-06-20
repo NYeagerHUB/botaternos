@@ -213,8 +213,9 @@ Có thể chỉnh file `bot/config.json` trực tiếp mà **không cần restar
 
 ### `/startserver` báo lỗi Aternos
 - Kiểm tra username/password Aternos trong `.env`
-- Đảm bảo python-aternos phiên bản tương thích: `pip install python-aternos==2.1.2`
-- Aternos đôi khi thay đổi API, kiểm tra [issues](https://github.com/DarkCat09/python-aternos/issues)
+- Cài Playwright browser: `python -m playwright install chromium`
+- Nếu deploy Linux/Railway, dùng build step: `python -m playwright install --with-deps chromium`
+- Nếu Aternos hiện captcha/verify, đăng nhập thủ công một lần rồi dùng lại session/cookie hợp lệ
 
 ### Reminder không gửi
 - Kiểm tra `discord_announce_channel_id` và `discord_minecraft_role_id` trong `config.json`
@@ -229,7 +230,7 @@ Có thể chỉnh file `bot/config.json` trực tiếp mà **không cần restar
 |---------|---------|---------|
 | `discord.py` | 2.3.2 | Discord API, slash commands |
 | `mcstatus` | 11.1.1 | Query Minecraft server status |
-| `python-aternos` | 2.1.2 | Điều khiển Aternos server |
+| `playwright` | 1.60.0 | Điều khiển browser thật để thao tác Aternos |
 | `aiohttp` | 3.9.5 | Async HTTP (dependency) |
 | `python-dotenv` | 1.0.1 | Load file .env |
 

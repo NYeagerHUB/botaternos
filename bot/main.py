@@ -55,6 +55,7 @@ class MinecraftBot(commands.Bot):
     async def setup_hook(self):
         """Chạy khi bot khởi động - load tất cả cogs."""
         cogs = [
+            "cogs.aternos",
             "cogs.status",
             "cogs.reminder",
             "cogs.monitor",

@@ -4,11 +4,11 @@ discord.py==2.3.2
 # Minecraft server status
 mcstatus==11.1.1
 
-# Aternos control
-python-aternos==2.1.2
-
 # Async HTTP
 aiohttp==3.9.5
+
+# Browser automation for Aternos
+playwright==1.60.0
 
 # Environment variables
 python-dotenv==1.0.1

@@ -10,5 +10,8 @@ yt-dlp==2024.4.9
 # Async HTTP
 aiohttp==3.9.5
 
+# Browser automation for Aternos
+playwright==1.60.0
+
 # Environment variables
 python-dotenv==1.0.1
